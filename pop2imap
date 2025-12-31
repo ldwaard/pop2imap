@@ -30,9 +30,10 @@ $Revision: 1.27 $
           [--user1 <string>] [--passfile1 <string>]
           [--host2 server2]  [--port2 <num>] [--ssl2|--starttls2]
           [--user2 <string>] [--passfile2 <string>]
+          [--oauthaccesstoken2 <string>]
           [--from <string>]  [--to <string>]
           [--justlogin]
-	  [--timeout2 <int>]
+          [--timeout2 <int>]
           [--folder <string>]
           [--delete]
           [--dry]
@@ -99,6 +100,7 @@ use Getopt::Long;
 use Email::Simple;
 use Date::Manip;
 use Test::More ;
+use MIME::Base64;
 
 use strict;
 
@@ -109,8 +111,8 @@ $rcs, $VERSION, $error, $debug, $version, $help,
 $tests, $testsdebug, $test_builder,
 $from, $to,
 $user1, $ssl1, $password1, $host1, $passfile1,
-$user2, $ssl2, $starttls2, $password2, $host2, $passfile2, $timeout2,
-$pop, $imap, $debugpop, $debugimap, $justlogin, $folder, $folder2, 
+$user2, $ssl2, $starttls2, $password2, $host2, $passfile2, $oauthaccesstoken2,
+$timeout2, $pop, $imap, $debugpop, $debugimap, $justlogin, $folder, $folder2, 
 $port1, $port2,
 $delete, $dry, $expunge,
 $quiet,
@@ -189,8 +191,8 @@ if ($idatefromheader) {
 
 
 sub missing_option {
-        my ($option) = @_;
-        die "$option option must be used, run $0 --help for help\n";
+    my ($option) = @_;
+    die "$option option must be used, run $0 --help for help\n";
 }
 sub incompatible {
 	my ($opt1, $opt2) = @_;
@@ -198,10 +200,10 @@ sub incompatible {
 }
 
 $pop = new Mail::POP3Client( 
-			    DEBUG    => $debugpop,
-			    HOST     => $host1,
-			    PORT     => $port1,
-                            USESSL   => $ssl1,
+    DEBUG    => $debugpop,
+    HOST     => $host1,
+    PORT     => $port1,
+    USESSL   => $ssl1,
 );
 
 $pop->User($user1);
@@ -222,13 +224,10 @@ if (getpopheaders($pop) <= 0) {
 	exit( 0 ) ;
 }
 
-
 sub imap_connect {
 	my %common = (
 		Server   => $host2,
 		Port     => $port2,
-		User     => $user2,
-		Password => $password2,
 		Peek	 => 1,
 		Uid	 => 1,
 		Debug    => $debugimap,
@@ -240,6 +239,27 @@ sub imap_connect {
 		$common{'Starttls'} = $starttls2;
 	}
 	$imap = Mail::IMAPClient->new(%common) || die "";
+    $imap->connect() || die "";
+    if(!$oauthaccesstoken2) {
+		$imap->User( $user2 );
+		$imap->Password( $password2 );
+    } else {
+        my $oauthaccesstoken_str ;
+        if ( -f -r $oauthaccesstoken2 )
+        {
+            $oauthaccesstoken_str = firstline( $oauthaccesstoken2 ) ;
+        }
+        else
+        {
+            $oauthaccesstoken_str = $oauthaccesstoken2 || 'Please define oauthaccesstoken value' ;
+        }
+        my $oauth_string = "user=" . $user2 . "\x01auth=Bearer ".  $oauthaccesstoken_str . "\x01\x01" ;
+        my $oauth_string_base64 = encode_base64( $oauth_string , '' ) ;
+        my $oauthdirect_str = $oauth_string_base64 ;
+        $imap->Authmechanism( 'XOAUTH2' ) ;
+        $imap->Authcallback( sub { return $oauthdirect_str } ) ;
+    }
+    $imap->login(  ) || die "login failed";
 	$quiet || print("startls negotiated with IMAP server\n");
 }
 
@@ -275,7 +295,7 @@ foreach my $m ( keys( %$imap_mid_fetch2 ) ) {
 		}
 		$number_of_mid{$mid2} = $m;
 		$quiet || print "$number_of_mid{$mid2} $mid2\n";
-	}else{
+	} else {
 		$quiet || warn "Message $m has no Message-ID\n";
 	}
 }
@@ -290,13 +310,13 @@ foreach my $popid (keys(%popmess)) {
 			"Pop num : ", $popmess{$popid}, "\n";
 			copypopimap($pop, $imap, $popid);
 			
-	}else{
+	} else {
 		$quiet || print "Found $number_of_mid{$popid} $popid\n";
 		if ($delete) {
 			unless($dry) { 
 				$pop->Delete($popmess{$popid});
 				$quiet || print "Deletion completed\n";
-			}else{
+			} else {
 				$quiet || print "Deletion not completed (dry mode)\n";
 			}
 		}
@@ -316,7 +336,7 @@ sub getpopheaders {
 		my $pending_msgid;
 		foreach my $header ( $pop->Head( $i ) ) {
 			# Long headers may be split over multiple lines.
-		    	# we only care about reconstructing the Message-Id
+            # we only care about reconstructing the Message-Id
 			if ($pending_msgid) {
 				if ($header =~ m/^\s+(.+)/) {
 					$header = "$pending_msgid $header";
@@ -330,7 +350,7 @@ sub getpopheaders {
 				$quiet || print "$i $id", "\n";
 				if (exists($popmess{$id})) {
 					warn "ID $id already exists\n";
-				}else{
+				} else {
 					$popmess{$id} = $i;
 				}
 			}
@@ -356,12 +376,12 @@ sub extract_date {
 
 
 sub good_date {
-        # two incoming formats:
-        # header    Tue, 24 Aug 2010 16:00:00 +0200
+    # two incoming formats:
+    # header    Tue, 24 Aug 2010 16:00:00 +0200
 	# internal       24-Aug-2010 16:00:00 +0200
 	
-        # outgoing format: internal date format
-        #   24-Aug-2010 16:00:00 +0200
+    # outgoing format: internal date format
+    #   24-Aug-2010 16:00:00 +0200
 	
     my $d = shift ;
     my $date1 = $d ;
@@ -375,96 +395,96 @@ sub good_date {
 		$day_1 = '0' if ($day_1 eq '') ;
 		$zone  = ' +0000'  if not defined($zone) ;
 		$d = $day_1 . $date_rest . $hour . $zone ;
-                last SWITCH ;
+            last SWITCH ;
         }
         
-	if ($d =~ m{(?:\w{3,},\s)?(\d{1,2}),?\s+(\w{3,})\s+(\d{2,4})\s+(\d{1,2})(?::|\.)(\d{1,2})(?:(?::|\.)(\d{1,2}))?\s*((?:\+|-)\d{4})?}xo ) {
-        	# Handles any combination of following formats
-                # Tue, 24 Aug 2010 16:00:00 +0200 -- Standard
-                # 24 Aug 2010 16:00:00 +0200 -- Missing Day of Week
-                # Tue, 24 Aug 97 16:00:00 +0200 -- Two digit year
-                # Tue, 24 Aug 1997 16.00.00 +0200 -- Periods instead of colons 
-                # Tue, 24 Aug 1997  16:00:00 +0200 -- Extra whitespace between year and hour
-                # Tue, 24 Aug 1997 6:5:2 +0200 -- Single digit hour, min, or second
-                # Tue, 24, Aug 1997 16:00:00 +0200 -- Extra comma
+        if ($d =~ m{(?:\w{3,},\s)?(\d{1,2}),?\s+(\w{3,})\s+(\d{2,4})\s+(\d{1,2})(?::|\.)(\d{1,2})(?:(?::|\.)(\d{1,2}))?\s*((?:\+|-)\d{4})?}xo ) {
+            # Handles any combination of following formats
+            # Tue, 24 Aug 2010 16:00:00 +0200 -- Standard
+            # 24 Aug 2010 16:00:00 +0200 -- Missing Day of Week
+            # Tue, 24 Aug 97 16:00:00 +0200 -- Two digit year
+            # Tue, 24 Aug 1997 16.00.00 +0200 -- Periods instead of colons 
+            # Tue, 24 Aug 1997  16:00:00 +0200 -- Extra whitespace between year and hour
+            # Tue, 24 Aug 1997 6:5:2 +0200 -- Single digit hour, min, or second
+            # Tue, 24, Aug 1997 16:00:00 +0200 -- Extra comma
 
-                #print "header: [$1][$2][$3][$4][$5][$6][$7][$8]\n";
-                my ($day, $month, $year, $hour, $min, $sec, $zone) = ($1,$2,$3,$4,$5,$6,$7,$8);
-                $year = '19' . $year if length($year) == 2 && $year =~ m/^[789]/xo;
-                $year = '20' . $year if length($year) == 2;
-                 
-                $month = substr $month, 0, 3 if length($month) > 4;
-                $day = sprintf("%02d", $day);
-                $hour = sprintf("%02d", $hour);
-                $min = sprintf("%02d", $min);
-                $sec  = '00' if not defined($sec);
-                $sec = sprintf("%02d", $sec);
-                $zone  = '+0000' if not defined($zone);
-                $d = "$day-$month-$year $hour:$min:$sec $zone";
-		last SWITCH ;
-	}
-    
-	if ($d =~ m{(?:.{3})\s(...)\s+(\d{1,2})\s(\d{1,2}):(\d{1,2}):(\d{1,2})\s(?:\w{3})?\s?(\d{4})}xo ) {
-        	# Handles any combination of following formats
-                # Sun Aug 20 11:55:09 2006
-                # Wed Jan 24 11:58:38 MST 2007
-                # Wed Jan  2 08:40:57 2008
+            #print "header: [$1][$2][$3][$4][$5][$6][$7][$8]\n";
+            my ($day, $month, $year, $hour, $min, $sec, $zone) = ($1,$2,$3,$4,$5,$6,$7,$8);
+            $year = '19' . $year if length($year) == 2 && $year =~ m/^[789]/xo;
+            $year = '20' . $year if length($year) == 2;
+             
+            $month = substr $month, 0, 3 if length($month) > 4;
+            $day = sprintf("%02d", $day);
+            $hour = sprintf("%02d", $hour);
+            $min = sprintf("%02d", $min);
+            $sec  = '00' if not defined($sec);
+            $sec = sprintf("%02d", $sec);
+            $zone  = '+0000' if not defined($zone);
+            $d = "$day-$month-$year $hour:$min:$sec $zone";
+            last SWITCH ;
+        }
+        
+        if ($d =~ m{(?:.{3})\s(...)\s+(\d{1,2})\s(\d{1,2}):(\d{1,2}):(\d{1,2})\s(?:\w{3})?\s?(\d{4})}xo ) {
+            # Handles any combination of following formats
+            # Sun Aug 20 11:55:09 2006
+            # Wed Jan 24 11:58:38 MST 2007
+            # Wed Jan  2 08:40:57 2008
 
-                #print "header: [$1][$2][$3][$4][$5][$6]\n";
-                my ($month, $day, $hour, $min, $sec, $year) = ($1,$2,$3,$4,$5,$6);
-                $day = sprintf("%02d", $day);
-                $hour = sprintf("%02d", $hour);
-                $min = sprintf("%02d", $min);
-                $sec = sprintf("%02d", $sec);
-                $d = "$day-$month-$year $hour:$min:$sec +0000";
-		last SWITCH ;
-	}
+            #print "header: [$1][$2][$3][$4][$5][$6]\n";
+            my ($month, $day, $hour, $min, $sec, $year) = ($1,$2,$3,$4,$5,$6);
+            $day = sprintf("%02d", $day);
+            $hour = sprintf("%02d", $hour);
+            $min = sprintf("%02d", $min);
+            $sec = sprintf("%02d", $sec);
+            $d = "$day-$month-$year $hour:$min:$sec +0000";
+            last SWITCH ;
+        }
 
         if ($d =~ m{(\d{2})/(\d{2})/(\d{2})\s(\d{2}):(\d{2}):(\d{2})}xo ) {
-                # Handles the following format
-                # 02/06/09 22:18:08 -- Generated by AVTECH TemPageR devices
+            # Handles the following format
+            # 02/06/09 22:18:08 -- Generated by AVTECH TemPageR devices
 
-                #print "header: [$1][$2][$3][$4][$5][$6]\n";
-                my ($month, $day, $year, $hour, $min, $sec) = ($1,$2,$3,$4,$5,$6);
-                $year = '20' . $year;
-                my %num2mon = qw(01 Jan 02 Feb 03 Mar 04 Apr 05 May 06 Jun 07 Jul 08 Aug 09 Sep 10 Oct 11 Nov 12 Dec);
-                $month = $num2mon{$month};
-                $d = "$day-$month-$year $hour:$min:$sec +0000";
-		last SWITCH ;
-	}
-    
-	if ($d =~ m{\w{6,},\s(\w{3})\w+\s+(\d{1,2}),\s(\d{4})\s(\d{2}):(\d{2})\s(AM|PM)}xo ) {
-        	# Handles the following format
-                # Saturday, December 14, 2002 05:00 PM - KBtoys.com order confirmations
+            #print "header: [$1][$2][$3][$4][$5][$6]\n";
+            my ($month, $day, $year, $hour, $min, $sec) = ($1,$2,$3,$4,$5,$6);
+            $year = '20' . $year;
+            my %num2mon = qw(01 Jan 02 Feb 03 Mar 04 Apr 05 May 06 Jun 07 Jul 08 Aug 09 Sep 10 Oct 11 Nov 12 Dec);
+            $month = $num2mon{$month};
+            $d = "$day-$month-$year $hour:$min:$sec +0000";
+            last SWITCH ;
+        }
+        
+        if ($d =~ m{\w{6,},\s(\w{3})\w+\s+(\d{1,2}),\s(\d{4})\s(\d{2}):(\d{2})\s(AM|PM)}xo ) {
+            # Handles the following format
+            # Saturday, December 14, 2002 05:00 PM - KBtoys.com order confirmations
 
-                my ($month, $day, $year, $hour, $min, $apm) = ($1,$2,$3,$4,$5,$6);
+            my ($month, $day, $year, $hour, $min, $apm) = ($1,$2,$3,$4,$5,$6);
 
-                $hour += 12 if $apm eq 'PM';
-                $day = sprintf("%02d", $day);
-                $d = "$day-$month-$year $hour:$min:00 +0000";
-                last SWITCH ;
-	}
-    
-	if ($d =~ m{(\w{3})\s(\d{1,2})\s(\d{4})\s(\d{2}):(\d{2}):(\d{2})\s((?:\+|-)\d{4})}xo ) {
-        	# Handles the following format
-                # Saturday, December 14, 2002 05:00 PM - jr.com order confirmations
+            $hour += 12 if $apm eq 'PM';
+            $day = sprintf("%02d", $day);
+            $d = "$day-$month-$year $hour:$min:00 +0000";
+            last SWITCH ;
+        }
+        
+        if ($d =~ m{(\w{3})\s(\d{1,2})\s(\d{4})\s(\d{2}):(\d{2}):(\d{2})\s((?:\+|-)\d{4})}xo ) {
+            # Handles the following format
+            # Saturday, December 14, 2002 05:00 PM - jr.com order confirmations
 
-                my ($month, $day, $year, $hour, $min, $sec, $zone) = ($1,$2,$3,$4,$5,$6,$7);
+            my ($month, $day, $year, $hour, $min, $sec, $zone) = ($1,$2,$3,$4,$5,$6,$7);
 
-                $day = sprintf("%02d", $day);
-                $d = "$day-$month-$year $hour:$min:$sec $zone";
-                last SWITCH ;
-	}
-    
-	if ($d =~ m{(\d{1,2})-(\w{3})-(\d{4})}xo ) {
-        	# Handles the following format
-                # 21-Jun-2001 - register.com domain transfer email circa 2001
+            $day = sprintf("%02d", $day);
+            $d = "$day-$month-$year $hour:$min:$sec $zone";
+            last SWITCH ;
+        }
+        
+        if ($d =~ m{(\d{1,2})-(\w{3})-(\d{4})}xo ) {
+            # Handles the following format
+            # 21-Jun-2001 - register.com domain transfer email circa 2001
 
-                my ($day, $month, $year) = ($1,$2,$3);
-                $day = sprintf("%02d", $day);
-                $d = "$day-$month-$year 11:11:11 +0000";
-		last SWITCH ;
-	}
+            my ($day, $month, $year) = ($1,$2,$3);
+            $day = sprintf("%02d", $day);
+            $d = "$day-$month-$year 11:11:11 +0000";
+            last SWITCH ;
+        }
         
     	# unknown or unmatch => return same string
     	return($d);
@@ -488,26 +508,26 @@ sub tests_good_date {
 	ok('"01-Sep-2010 16:00:00 +0000"' eq good_date('Wed, 1 Sep 2010 16:00:00'), 'good_date header SP 1digit zone');
 	ok('"01-Sep-2010 16:00:00 +0200"' eq good_date('Wed, 1 Sep 2010 16:00:00 +0200'), 'good_date header SP 1digit zone');
 	ok('"01-Sep-2010 16:00:00 +0200"' eq good_date('Wed, 1 Sep 2010 16:00:00 +0200 (CEST)'), 'good_date header SP 1digit zone');
-        ok('"06-Feb-2009 22:18:08 +0000"' eq good_date('02/06/09 22:18:08'), 'good_date header TemPageR');
-        ok('"02-Jan-2008 08:40:57 +0000"' eq good_date('Wed Jan  2 08:40:57 2008'), 'good_date header dice.com support 1digit day');
-        ok('"20-Aug-2006 11:55:09 +0000"' eq good_date('Sun Aug 20 11:55:09 2006'), 'good_date header dice.com support 2digit day');
-        ok('"24-Jan-2007 11:58:38 +0000"' eq good_date('Wed Jan 24 11:58:38 MST 2007'), 'good_date header status-now.com');
-        ok('"24-Aug-2010 16:00:00 +0200"' eq good_date('24 Aug 2010 16:00:00 +0200'), 'good_date header missing date of week');
-        ok('"24-Aug-2067 16:00:00 +0200"' eq good_date('Tue, 24 Aug 67 16:00:00 +0200'), 'good_date header 2digit year');
-        ok('"24-Aug-1977 16:00:00 +0200"' eq good_date('Tue, 24 Aug 77 16:00:00 +0200'), 'good_date header 2digit year');
-        ok('"24-Aug-1987 16:00:00 +0200"' eq good_date('Tue, 24 Aug 87 16:00:00 +0200'), 'good_date header 2digit year');
-        ok('"24-Aug-1997 16:00:00 +0200"' eq good_date('Tue, 24 Aug 97 16:00:00 +0200'), 'good_date header 2digit year');
-        ok('"24-Aug-2004 16:00:00 +0200"' eq good_date('Tue, 24 Aug 04 16:00:00 +0200'), 'good_date header 2digit year');
-        ok('"24-Aug-1997 16:00:00 +0200"' eq good_date('Tue, 24 Aug 1997 16.00.00 +0200'), 'good_date header period time sep');
-        ok('"24-Aug-1997 16:00:00 +0200"' eq good_date('Tue, 24 Aug 1997  16:00:00 +0200'), 'good_date header extra white space type1');
-        ok('"24-Aug-1997 05:06:02 +0200"' eq good_date('Tue, 24 Aug 1997 5:6:2 +0200'), 'good_date header 1digit time vals');
-        ok('"24-Aug-1997 05:06:02 +0200"' eq good_date('Tue, 24, Aug 1997 05:06:02 +0200'), 'good_date header extra commas');
-        ok('"01-Oct-2003 12:45:24 +0000"' eq good_date('Wednesday, 01 October 2003 12:45:24 CDT'), 'good_date header no abbrev');
-        ok('"11-Jan-2005 17:58:27 -0500"' eq good_date('Tue,  11  Jan 2005 17:58:27 -0500'), 'good_date extra white space');
-        ok('"18-Dec-2002 15:07:00 +0000"' eq good_date('Wednesday, December 18, 2002 03:07 PM'), 'good_date kbtoys.com orders');
-        ok('"16-Dec-2004 02:01:49 -0500"' eq good_date('Dec 16 2004 02:01:49 -0500'), 'good_date jr.com orders');
-        ok('"21-Jun-2001 11:11:11 +0000"' eq good_date('21-Jun-2001'), 'good_date register.com domain transfer');
-        ok('"18-Nov-2012 18:34:38 +0100"' eq good_date('Sun, 18 Nov 2012 18:34:38 +0100'), 'good_date pop2imap bug (WesteuropÃ¤ische Normalzeit)');
+    ok('"06-Feb-2009 22:18:08 +0000"' eq good_date('02/06/09 22:18:08'), 'good_date header TemPageR');
+    ok('"02-Jan-2008 08:40:57 +0000"' eq good_date('Wed Jan  2 08:40:57 2008'), 'good_date header dice.com support 1digit day');
+    ok('"20-Aug-2006 11:55:09 +0000"' eq good_date('Sun Aug 20 11:55:09 2006'), 'good_date header dice.com support 2digit day');
+    ok('"24-Jan-2007 11:58:38 +0000"' eq good_date('Wed Jan 24 11:58:38 MST 2007'), 'good_date header status-now.com');
+    ok('"24-Aug-2010 16:00:00 +0200"' eq good_date('24 Aug 2010 16:00:00 +0200'), 'good_date header missing date of week');
+    ok('"24-Aug-2067 16:00:00 +0200"' eq good_date('Tue, 24 Aug 67 16:00:00 +0200'), 'good_date header 2digit year');
+    ok('"24-Aug-1977 16:00:00 +0200"' eq good_date('Tue, 24 Aug 77 16:00:00 +0200'), 'good_date header 2digit year');
+    ok('"24-Aug-1987 16:00:00 +0200"' eq good_date('Tue, 24 Aug 87 16:00:00 +0200'), 'good_date header 2digit year');
+    ok('"24-Aug-1997 16:00:00 +0200"' eq good_date('Tue, 24 Aug 97 16:00:00 +0200'), 'good_date header 2digit year');
+    ok('"24-Aug-2004 16:00:00 +0200"' eq good_date('Tue, 24 Aug 04 16:00:00 +0200'), 'good_date header 2digit year');
+    ok('"24-Aug-1997 16:00:00 +0200"' eq good_date('Tue, 24 Aug 1997 16.00.00 +0200'), 'good_date header period time sep');
+    ok('"24-Aug-1997 16:00:00 +0200"' eq good_date('Tue, 24 Aug 1997  16:00:00 +0200'), 'good_date header extra white space type1');
+    ok('"24-Aug-1997 05:06:02 +0200"' eq good_date('Tue, 24 Aug 1997 5:6:2 +0200'), 'good_date header 1digit time vals');
+    ok('"24-Aug-1997 05:06:02 +0200"' eq good_date('Tue, 24, Aug 1997 05:06:02 +0200'), 'good_date header extra commas');
+    ok('"01-Oct-2003 12:45:24 +0000"' eq good_date('Wednesday, 01 October 2003 12:45:24 CDT'), 'good_date header no abbrev');
+    ok('"11-Jan-2005 17:58:27 -0500"' eq good_date('Tue,  11  Jan 2005 17:58:27 -0500'), 'good_date extra white space');
+    ok('"18-Dec-2002 15:07:00 +0000"' eq good_date('Wednesday, December 18, 2002 03:07 PM'), 'good_date kbtoys.com orders');
+    ok('"16-Dec-2004 02:01:49 -0500"' eq good_date('Dec 16 2004 02:01:49 -0500'), 'good_date jr.com orders');
+    ok('"21-Jun-2001 11:11:11 +0000"' eq good_date('21-Jun-2001'), 'good_date register.com domain transfer');
+    ok('"18-Nov-2012 18:34:38 +0100"' eq good_date('Sun, 18 Nov 2012 18:34:38 +0100'), 'good_date pop2imap bug (WesteuropÃ¤ische Normalzeit)');
 
 	return(  ) ;
 }
@@ -525,43 +545,42 @@ sub copypopimap {
 	unless($dry) { 
 		unless ($imap->append_string($folder2, "$mess", "", $date_pop)) {
 			print "Transfer failed\n";
-		}else{
+		} else {
 			$quiet || print "Transfer completed\n";
 			if ($delete) {
 				$pop->Delete($popmess{$popid});
 				$quiet || print "Deletion completed\n";
 			}
 		}
-	}else{
+	} else {
 		print "Transfer not done (dry-run mode)\n";
 	}
 }
 
 
 sub  firstline {
-        # extract the first line of a file (without \n)
+    # extract the first line of a file (without \n)
 
-        my($file) = @_;
-        my $line  = "";
-        
-        open FILE, $file or die("$! $file");
-        chomp($line = <FILE>);
-        close FILE;
-        $line = ($line) ? $line : "!EMPTY! $file";
-        return $line;   
+    my($file) = @_;
+    my $line  = "";
+    
+    open FILE, $file or die("$! $file");
+    chomp($line = <FILE>);
+    close FILE;
+    $line = ($line) ? $line : "!EMPTY! $file";
+    return $line;   
 }
 
 
 
 sub tests {
-
-      SKIP: {
-		skip "No test in normal run" if ( not $tests ) ;
-		tests_good_date(  ) ;
-		done_testing( 28 ) ;
-		note("End of pop2imap --tests") ;
+    SKIP: {
+        skip "No test in normal run" if ( not $tests ) ;
+        tests_good_date(  ) ;
+        done_testing( 28 ) ;
+        note("End of pop2imap --tests") ;
 	}
-        return(  ) ;
+    return(  ) ;
 }
 
 
@@ -571,42 +590,43 @@ sub get_options
 	$test_builder = Test::More->builder ;
 	$test_builder->no_ending( 1 ) ;
 
-        my $numopt = scalar(@ARGV);
-        my $opt_ret = GetOptions(
-                                   "debug"       => \$debug,
-                                   "debugimap"   => \$debugimap,
-                                   "debugpop"    => \$debugpop,
-				   "tests"       => \$tests,
-				   "testsdebug"  => \$testsdebug,
-                                   "host1=s"     => \$host1,
-                                   "host2=s"     => \$host2,
-                                   "port1=i"     => \$port1,
-                                   "port2=i"     => \$port2,
-                                   "user1=s"     => \$user1,
-                                   "user2=s"     => \$user2,
-                                   "from=s"      => \$from,
-                                   "to=s"        => \$to,
-                                   "justlogin!"  => \$justlogin,
-                                   "password1=s" => \$password1,
-                                   "password2=s" => \$password2,
-                                   "passfile1=s" => \$passfile1,
-                                   "passfile2=s" => \$passfile2,
-				   "ssl1!"	 => \$ssl1,
-				   "ssl2!"	 => \$ssl2,
-				   "starttls2!"	 => \$starttls2,
-                                   "folder=s"    => \$folder,
-                                   "delete!"     => \$delete,
-                                   "dry!"        => \$dry,
-                                   "quiet!"      => \$quiet,
-                                   "version"     => \$version,
-                                   "help"        => \$help,
-				   "idatefromheader!" => \$idatefromheader,
-				   "timeout2=i"  => \$timeout2,
-                                  );
+    my $numopt = scalar(@ARGV);
+    my $opt_ret = GetOptions(
+        "debug"               => \$debug,
+        "debugimap"           => \$debugimap,
+        "debugpop"            => \$debugpop,
+        "tests"               => \$tests,
+        "testsdebug"          => \$testsdebug,
+        "host1=s"             => \$host1,
+        "host2=s"             => \$host2,
+        "port1=i"             => \$port1,
+        "port2=i"             => \$port2,
+        "user1=s"             => \$user1,
+        "user2=s"             => \$user2,
+        "from=s"              => \$from,
+        "to=s"                => \$to,
+        "justlogin!"          => \$justlogin,
+        "password1=s"         => \$password1,
+        "password2=s"         => \$password2,
+        "passfile1=s"         => \$passfile1,
+        "passfile2=s"         => \$passfile2,
+        "oauthaccesstoken2=s" => \$oauthaccesstoken2,
+        "ssl1!"	              => \$ssl1,
+        "ssl2!"	              => \$ssl2,
+        "starttls2!"	      => \$starttls2,
+        "folder=s"            => \$folder,
+        "delete!"             => \$delete,
+        "dry!"                => \$dry,
+        "quiet!"              => \$quiet,
+        "version"             => \$version,
+        "help"                => \$help,
+        "idatefromheader!"    => \$idatefromheader,
+        "timeout2=i"          => \$timeout2,
+    );
           
-        $debug and print "get options: [$opt_ret]\n";
-        print "$VERSION\n" and exit if ($version) ;
-        usage() and exit if ($help or ! $numopt) ;
+    $debug and print "get options: [$opt_ret]\n";
+    print "$VERSION\n" and exit if ($version) ;
+    usage() and exit if ($help or ! $numopt) ;
 
 	if ( $tests ) {
 		$test_builder->no_ending( 0 ) ;
@@ -620,7 +640,7 @@ sub get_options
 	}
 
 
-        exit unless ($opt_ret) ;
+    exit unless ($opt_ret) ;
         
         
 }
@@ -633,38 +653,39 @@ usage: $0 [options]
 
 Several options are mandatory. See the example below.
 
---from        <string> : parsed as <user1>@<host1>[:<port1>]
---host1       <string> : "from" POP server. Mandatory.
---port1       <int>    : port to connect. Default is 110 (ssl:995).
---user1       <string> : user to login.   Mandatory.
---password1   <string> : password for the user1. Dangerous, use --passfile1
---passfile1   <string> : password file for the user1. Contains the password.
---ssl1                 : enable ssl on POP connect
---to          <string> : parsed as <user2>@<host2>[:<port2>][/<folder>]
---host2       <string> : "destination" IMAP server. Mandatory.
---port2       <int>    : port to connect. Default is 143 (ssl:993).
---user2       <string> : user to login.   Mandatory.
---password2   <string> : password for the user2. Dangerous, use --passfile2
---passfile2   <string> : password file for the user2. Contains the password.
---ssl2                 : enable ssl on IMAP connect
---starttls2            : use starttls on IMAP connect instead of SSL
---timeout2    <int>    : Connections timeout in seconds. Default is 240.
---folder      <string> : sync to this IMAP folder.
---delete               : delete messages in "from" POP server after
-                         a successful transfer. useful in case you
-                         want to migrate from one server to another one.
-                         They are really deleted when a QUIT command
-                         is send.
---idatefromheader      : sets the internal dates on host2 same as the 
-                         "Date:" headers from host1. Turned on by default.
---dry                  : do nothing, just print what would be done.
---debug                : debug mode.
---debugimap            : IMAP debug mode.
---debugpop             : POP debug mode.
---tests                : Run non-regression tests
---quiet                : Only print error messages
---version              : print sotfware version.
---help                 : print this message.
+--from              <string> : parsed as <user1>@<host1>[:<port1>]
+--host1             <string> : "from" POP server. Mandatory.
+--port1             <int>    : port to connect. Default is 110 (ssl:995).
+--user1             <string> : user to login.   Mandatory.
+--password1         <string> : password for the user1. Dangerous, use --passfile1
+--passfile1         <string> : password file for the user1. Contains the password.
+--ssl1                       : enable ssl on POP connect
+--to                <string> : parsed as <user2>@<host2>[:<port2>][/<folder>]
+--host2             <string> : "destination" IMAP server. Mandatory.
+--port2             <int>    : port to connect. Default is 143 (ssl:993).
+--user2             <string> : user to login.   Mandatory.
+--password2         <string> : password for the user2. Dangerous, use --passfile2
+--passfile2         <string> : password file for the user2. Contains the password.
+--oauthaccesstoken2 <string> : oauth token file for the user2. First line contains the token.
+--ssl2                       : enable ssl on IMAP connect
+--starttls2                  : use starttls on IMAP connect instead of SSL
+--timeout2          <int>    : Connections timeout in seconds. Default is 240.
+--folder            <string> : sync to this IMAP folder.
+--delete                     : delete messages in "from" POP server after
+                               a successful transfer. useful in case you
+                               want to migrate from one server to another one.
+                               They are really deleted when a QUIT command
+                               is send.
+--idatefromheader            : sets the internal dates on host2 same as the 
+                               "Date:" headers from host1. Turned on by default.
+--dry                        : do nothing, just print what would be done.
+--debug                      : debug mode.
+--debugimap                  : IMAP debug mode.
+--debugpop                   : POP debug mode.
+--tests                      : Run non-regression tests
+--quiet                      : Only print error messages
+--version                    : print sotfware version.
+--help                       : print this message.
 
 Example: to synchronise pop  account "foo" on "pop3.truc.org"
                      to imap account "bar" on "imap.trac.org"
